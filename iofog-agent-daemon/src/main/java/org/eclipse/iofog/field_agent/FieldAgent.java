@@ -1277,6 +1277,7 @@ public class FieldAgent implements IOFogModule {
         } catch (Exception e) {
             logError("Error saving config updates", new AgentSystemException("Error saving config updates", e));
         }
+        ProcessManager.getInstance().cancelRunningTasks();
         microserviceManager.clear();
         try{
             ProcessManager.getInstance().stopRunningMicroservices(false, iofogUuid);

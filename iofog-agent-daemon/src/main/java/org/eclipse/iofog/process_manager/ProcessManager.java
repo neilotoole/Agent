@@ -28,6 +28,7 @@ import org.eclipse.iofog.utils.configuration.Configuration;
 import org.eclipse.iofog.utils.logging.LoggingService;
 
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -46,6 +47,7 @@ public class ProcessManager implements IOFogModule {
 
 	private static final String MODULE_NAME = "Process Manager";
 	private MicroserviceManager microserviceManager;
+	private CompletableFuture<Void> task;
 	private final Queue<ContainerTask> tasks = new LinkedList<>();
 
 	private DockerUtil docker;
@@ -362,6 +364,23 @@ public class ProcessManager implements IOFogModule {
 		return isUpdated;
 	}
 
+	public void cancelRunningTasks() {
+		logInfo("Cancelling running tasks");
+		synchronized (tasks) {
+			if (tasks != null) {
+				tasks.clear();
+			}
+		}
+
+		if (this.task != null && !isTaskRunning(this.task)) {
+			this.task.cancel(true);
+		}
+	}
+
+	private boolean isTaskRunning(CompletableFuture task) {
+		return task.isCancelled() || task.isDone() || task.isCompletedExceptionally();
+	}
+
 	/**
 	 * add a new {@link ContainerTask}
 	 *
@@ -399,12 +418,14 @@ public class ProcessManager implements IOFogModule {
 				}
 			}
 			try {
-				containerManager.execute(newTask);
+				task = containerManager.execute(newTask);
+				task.get();
 				logInfo(newTask.getAction() + " action completed for container " + newTask.getMicroserviceUuid());
+			} catch (InterruptedException interruptedException) {
+				logError(newTask.getAction() + " was canceled. container name: " + newTask.getMicroserviceUuid(), interruptedException);
 			} catch (Exception e) {
 				logError(newTask.getAction() + " was not successful. container name: " + newTask.getMicroserviceUuid(),
 						new AgentSystemException(newTask.getAction() + " was not successful. container name: " + newTask.getMicroserviceUuid(), e));
-
 				retryTask(newTask);
 			}
 			logInfo("Finished check tasks");

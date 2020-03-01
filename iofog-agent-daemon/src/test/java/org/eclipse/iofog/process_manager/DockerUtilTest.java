@@ -911,12 +911,10 @@ public class DockerUtilTest {
      * throws AgentSystemException
      */
     @Test (expected = AgentSystemException.class)
-    public void testPullImageWhenRegistryIsNull() throws AgentSystemException {
+    public void testPullImageWhenRegistryIsNull() throws Exception {
         dockerUtil.pullImage(imageID, null);
         PowerMockito.verifyStatic(LoggingService.class);
         LoggingService.logError(eq(MODULE_NAME), eq("Image not found"), any());
-
-
     }
 
     /**
@@ -934,7 +932,7 @@ public class DockerUtilTest {
             Mockito.verify(pullImageCmd).withRegistry(any());
             Mockito.verify(pullImageCmd).withTag(any());
             Mockito.verify(pullImageCmd).exec(any());
-        } catch (AgentSystemException e) {
+        } catch (Exception e) {
             fail("This should not happen");
         }
     }
@@ -959,7 +957,7 @@ public class DockerUtilTest {
             Mockito.verify(pullImageCmd).withTag(any());
             Mockito.verify(pullImageCmd).withAuthConfig(any());
             Mockito.verify(pullImageCmd).exec(any());
-        } catch (AgentSystemException e) {
+        } catch (Exception e) {
             fail("This should not happen");
         }
     }
@@ -970,7 +968,7 @@ public class DockerUtilTest {
      * throws AgentSystemException
      */
     @Test (expected = AgentSystemException.class)
-    public void throwsNotFoundExceptionPullImage() throws AgentSystemException {
+    public void throwsNotFoundExceptionPullImage() throws Exception {
         PowerMockito.doThrow(spy(new NotFoundException("Exception"))).when(pullImageCmd).exec(any());
         PowerMockito.when(registry.getUrl()).thenReturn("url");
         PowerMockito.when(registry.getIsPublic()).thenReturn(true);
@@ -986,7 +984,7 @@ public class DockerUtilTest {
      * throws AgentSystemException when DockerClient throws NotModifiedException
      */
     @Test (expected = AgentSystemException.class)
-    public void throwsNotModifiedExceptionExceptionPullImage() throws AgentSystemException {
+    public void throwsNotModifiedExceptionExceptionPullImage() throws Exception {
         PowerMockito.doThrow(spy(new NotModifiedException("Exception"))).when(pullImageCmd).exec(any());
         PowerMockito.when(registry.getUrl()).thenReturn("url");
         PowerMockito.when(registry.getIsPublic()).thenReturn(true);

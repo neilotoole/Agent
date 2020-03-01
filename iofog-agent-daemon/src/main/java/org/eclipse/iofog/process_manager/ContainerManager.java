@@ -12,7 +12,6 @@
  *******************************************************************************/
 package org.eclipse.iofog.process_manager;
 
-import com.github.dockerjava.api.exception.ConflictException;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.Image;
@@ -24,6 +23,9 @@ import org.eclipse.iofog.utils.Constants;
 import org.eclipse.iofog.utils.logging.LoggingService;
 
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.function.Supplier;
 
 import static org.eclipse.iofog.microservice.Microservice.deleteLock;
 
@@ -48,14 +50,17 @@ public class ContainerManager {
 	 *
 	 * @throws Exception exception
 	 */
-	private void addContainer(Microservice microservice) throws Exception {
+	private CompletableFuture<Void> addContainer(Microservice microservice) throws Exception {
+		CompletableFuture<Void> completableFuture = CompletableFuture.completedFuture(null);
 		LoggingService.logInfo(MODULE_NAME, "Start pull image from registry and creates a new container");
 		Optional<Container> containerOptional = docker.getContainer(microservice.getMicroserviceUuid());
 		if (!containerOptional.isPresent()) {
 			LoggingService.logInfo(MODULE_NAME, "creating \"" + microservice.getImageName() + "\"");
-			createContainer(microservice);
+			completableFuture = createContainer(microservice);
 		}
 		LoggingService.logInfo(MODULE_NAME, "Finished pull image from registry and creates a new container");
+
+		return completableFuture;
 	}
 
 	private Registry getRegistry(Microservice microservice) throws AgentSystemException {
@@ -75,68 +80,97 @@ public class ContainerManager {
 	 * @param withCleanUp if true then removes old image and volumes
 	 * @throws Exception exception
 	 */
-	private void updateContainer(Microservice microservice, boolean withCleanUp) throws Exception {
+	private CompletableFuture<Void> updateContainer(Microservice microservice, boolean withCleanUp) throws Exception {
 		LoggingService.logInfo(MODULE_NAME, "Start update container");
 		microservice.setUpdating(true);
-		removeContainerByMicroserviceUuid(microservice.getMicroserviceUuid(), withCleanUp);
-		createContainer(microservice);
-		microservice.setUpdating(false);
-		LoggingService.logInfo(MODULE_NAME, "Finished update container");
+		return removeContainerByMicroserviceUuid(microservice.getMicroserviceUuid(), withCleanUp)
+				.thenCombineAsync(createContainer(microservice), (v1, v2) -> null)
+				.handleAsync((v, e) -> {
+					microservice.setUpdating(false);
+					LoggingService.logInfo(MODULE_NAME, "Finished update container");
+					return null;
+				});
 	}
 
-	private void createContainer(Microservice microservice) throws Exception {
-		createContainer(microservice, true);
+	private CompletableFuture<Void> createContainer(Microservice microservice) throws Exception {
+		return createContainer(microservice, true);
 	}
 
-	private void createContainer(Microservice microservice, boolean pullImage) throws Exception {
+	private CompletableFuture<Void> createContainer(Microservice microservice, boolean pullImage) throws Exception {
+		CompletableFuture<Void> pullImageAsync = CompletableFuture.completedFuture(null);
+
 		setMicroserviceStatus(microservice.getMicroserviceUuid(), MicroserviceState.PULLING);
 		Registry registry = getRegistry(microservice);
 		if (!registry.getUrl().equals("from_cache") && pullImage){
 			LoggingService.logInfo(MODULE_NAME, "pulling \"" + microservice.getImageName() + "\" from registry");
-			try {
-				docker.pullImage(microservice.getImageName(), registry);
-			} catch (Exception e) {
-				LoggingService.logError(MODULE_NAME, "unable to pull \"" + microservice.getImageName() + "\" from registry. trying local cache",
-						new AgentSystemException("unable to pull \"" + microservice.getImageName() + "\" from registry. trying local cache", e));
-				createContainer(microservice, false);
-				LoggingService.logInfo(MODULE_NAME, "created \"" + microservice.getImageName() + "\" from local cache");
-				return;
-			}
-			LoggingService.logInfo(MODULE_NAME, String.format("\"%s\" pulled", microservice.getImageName()));
+			pullImageAsync = CompletableFuture
+					.supplyAsync(docker.pullImage(microservice.getImageName(), registry))
+					.exceptionally(e -> {
+						LoggingService.logError(MODULE_NAME, "unable to pull \"" + microservice.getImageName() + "\" from registry. trying local cache",
+								new AgentSystemException("unable to pull \"" + microservice.getImageName() + "\" from registry. trying local cache", e));
+						return null;
+					}).thenApplyAsync(e -> {
+						try {
+							createContainer(microservice, false).get();
+						} catch (Exception ex) {
+							throw new CompletionException(ex);
+						}
+						LoggingService.logInfo(MODULE_NAME, "created \"" + microservice.getImageName() + "\" from local cache");
+						return null;
+					}).thenApplyAsync((e) -> {
+						LoggingService.logInfo(MODULE_NAME, String.format("\"%s\" pulled", microservice.getImageName()));
+						return null;
+					}).thenApplyAsync((e) -> {
+						if (!docker.findLocalImage(microservice.getImageName())) {
+							throw new NotFoundException("Image not found in local cache");
+						}
+						return null;
+					});
 		}
-		if (!pullImage && !docker.findLocalImage(microservice.getImageName())) {
-			throw new NotFoundException("Image not found in local cache");
-		}
-		LoggingService.logInfo(MODULE_NAME, "creating container \"" + microservice.getImageName() + "\"");
-		setMicroserviceStatus(microservice.getMicroserviceUuid(), MicroserviceState.STARTING);
+
 		String hostName = IOFogNetworkInterface.getCurrentIpAddress();
-		String id = docker.createContainer(microservice, hostName);
-		microservice.setContainerId(id);
-		microservice.setContainerIpAddress(docker.getContainerIpAddress(id));
-		LoggingService.logInfo(MODULE_NAME, "container is created \"" + microservice.getImageName() + "\"");
-		startContainer(microservice);
-		microservice.setRebuild(false);
+		return pullImageAsync.thenAcceptAsync((e) -> {
+			LoggingService.logInfo(MODULE_NAME, "creating container \"" + microservice.getImageName() + "\"");
+			setMicroserviceStatus(microservice.getMicroserviceUuid(), MicroserviceState.STARTING);
+
+			CompletableFuture.supplyAsync(docker.createContainer(microservice, hostName))
+				.thenAcceptAsync((containerId) -> {
+					microservice.setContainerId(containerId);
+					try {
+						microservice.setContainerIpAddress(docker.getContainerIpAddress(containerId));
+					} catch (Exception ex) {
+						throw new CompletionException(ex);
+					}
+					LoggingService.logInfo(MODULE_NAME, "container is created \"" + microservice.getImageName() + "\"");
+					CompletableFuture<Void> future = CompletableFuture.supplyAsync(startContainer(microservice));
+					microservice.setRebuild(false);
+				});
+		});
 	}
 
 	/**
 	 * starts a {@link Container} and sets appropriate status
 	 */
-	private void startContainer(Microservice microservice) {
-		LoggingService.logInfo(MODULE_NAME, String.format("trying to start container \"%s\"", microservice.getImageName()));
-		try {
-			if (!docker.isContainerRunning(microservice.getContainerId())) {
-				docker.startContainer(microservice);
+	private Supplier<Void> startContainer(Microservice microservice) {
+		return () -> {
+			LoggingService.logInfo(MODULE_NAME, String.format("trying to start container \"%s\"", microservice.getImageName()));
+			try {
+				if (!docker.isContainerRunning(microservice.getContainerId())) {
+					docker.startContainer(microservice);
+				}
+				Optional<String> statusOptional = docker.getContainerStatus(microservice.getContainerId());
+				String status = statusOptional.orElse("unknown");
+				LoggingService.logInfo(MODULE_NAME, String.format("starting %s, status: %s", microservice.getImageName(), status));
+				microservice.setContainerIpAddress(docker.getContainerIpAddress(microservice.getContainerId()));
+			} catch (Exception ex) {
+				LoggingService.logError(MODULE_NAME,
+						String.format("Container \"%s\" not found", microservice.getImageName()),
+						new AgentSystemException(String.format("Container \"%s\" not found", microservice.getImageName()), ex));
 			}
-			Optional<String> statusOptional = docker.getContainerStatus(microservice.getContainerId());
-			String status = statusOptional.orElse("unknown");
-			LoggingService.logInfo(MODULE_NAME, String.format("starting %s, status: %s", microservice.getImageName(), status));
-			microservice.setContainerIpAddress(docker.getContainerIpAddress(microservice.getContainerId()));
-		} catch (Exception ex) {
-			LoggingService.logError(MODULE_NAME,
-					String.format("Container \"%s\" not found", microservice.getImageName()),
-					new AgentSystemException(String.format("Container \"%s\" not found", microservice.getImageName()), ex));
-		}
-		LoggingService.logInfo(MODULE_NAME, String.format("Finished trying to start container \"%s\"", microservice.getImageName()));
+			LoggingService.logInfo(MODULE_NAME, String.format("Finished trying to start container \"%s\"", microservice.getImageName()));
+
+			return null;
+		};
 	}
 
 	/**
@@ -144,64 +178,66 @@ public class ContainerManager {
 	 *
 	 * @param microserviceUuid id of the {@link Microservice}
 	 */
-	private void stopContainer(String microserviceUuid) {
+	private CompletableFuture<Void> stopContainer(String microserviceUuid) {
+		CompletableFuture<Void> completableFuture = CompletableFuture.completedFuture(null);
+
 		LoggingService.logInfo(MODULE_NAME, "Stop container by microserviceuuid : " + microserviceUuid);
 		Optional<Container> containerOptional = docker.getContainer(microserviceUuid);
-		containerOptional.ifPresent(container -> {
+		if (containerOptional.isPresent()) {
+			Container container = containerOptional.get();
 			setMicroserviceStatus(microserviceUuid, MicroserviceState.STOPPING);
 			LoggingService.logInfo(MODULE_NAME, String.format("Stopping container \"%s\"", container.getId()));
 			try {
-				docker.stopContainer(container.getId());
+				completableFuture = CompletableFuture.supplyAsync(docker.stopContainer(container.getId()));
 				LoggingService.logInfo(MODULE_NAME, String.format("Container \"%s\" stopped", container.getId()));
 			} catch (Exception e) {
 				LoggingService.logError(MODULE_NAME, String.format("Error stopping container \"%s\"", container.getId()),
 						new AgentSystemException(String.format("Error stopping container \"%s\"", container.getId()), e));
 			}
-		});
+		}
 		setMicroserviceStatus(microserviceUuid, MicroserviceState.STOPPED);
 		LoggingService.logInfo(MODULE_NAME, "Stopped container by microserviceuuid : " + microserviceUuid);
 
+		return completableFuture;
 	}
 
 	/**
 	 * removes a {@link Container} by Microservice uuid
 	 */
-	private void removeContainerByMicroserviceUuid(String microserviceUuid, boolean withCleanUp) throws AgentSystemException {
+	private CompletableFuture<Void> removeContainerByMicroserviceUuid(String microserviceUuid, boolean withCleanUp) throws AgentSystemException {
+		CompletableFuture<Void> completableFuture = CompletableFuture.completedFuture(null);
+
 		LoggingService.logInfo(MODULE_NAME, "Start remove container by microserviceuuid : " + microserviceUuid);
 		synchronized (deleteLock) {
 			Optional<Container> containerOptional = docker.getContainer(microserviceUuid);
 			if (containerOptional.isPresent()) {
-				stopContainer(microserviceUuid);
 				Container container = containerOptional.get();
 				setMicroserviceStatus(microserviceUuid, MicroserviceState.DELETING);
-				removeContainer(container.getId(), container.getImageId(), withCleanUp);
+				completableFuture = stopContainer(microserviceUuid)
+						.thenCombineAsync(removeContainer(container.getId(), container.getImageId(), withCleanUp), (v1, v2) -> null);
 			}
 		}
 		LoggingService.logInfo(MODULE_NAME, "Finished remove container by microserviceuuid : " + microserviceUuid);
+
+		return completableFuture;
 	}
 
-	private void removeContainer(String containerId, String imageId, boolean withCleanUp) throws AgentSystemException{
+	private CompletableFuture<Void> removeContainer(String containerId, String imageId, boolean withCleanUp) {
 		LoggingService.logInfo(MODULE_NAME, String.format("removing container \"%s\"", containerId));
-		try {
-			docker.removeContainer(containerId, withCleanUp);
-			if (withCleanUp) {
-				try {
-					docker.removeImageById(imageId);
-				} catch (ConflictException ex) {
-					LoggingService.logError(MODULE_NAME, String.format("Image for container \"%s\" cannot be removed", containerId),
-							new AgentSystemException(String.format("Image for container \"%s\" cannot be removed", containerId), ex));
-				} catch (Exception ex) {
-					LoggingService.logError(MODULE_NAME, String.format("Image for container \"%s\" cannot be removed", containerId),
-							new AgentSystemException(String.format("Image for container \"%s\" cannot be removed", containerId), ex));
-				}
-			}
-
-			LoggingService.logInfo(MODULE_NAME, String.format("Container \"%s\" removed", containerId));
-		} catch (Exception e) {
-			LoggingService.logError(MODULE_NAME, String.format("Error removing container \"%s\"", containerId),
-					new AgentSystemException(String.format("Error removing container \"%s\"", containerId), e));
-			throw new AgentSystemException(String.format("Error removing container \"%s\"", containerId), e);
+		CompletableFuture<Void> completableFuture = CompletableFuture.supplyAsync(docker.removeContainer(containerId, withCleanUp));
+		if (withCleanUp) {
+			completableFuture.thenApplyAsync(v -> CompletableFuture.supplyAsync(docker.removeImageById(imageId)))
+					.thenApplyAsync(u -> {
+						LoggingService.logInfo(MODULE_NAME, String.format("Container \"%s\" removed", containerId));
+						return null;
+					}).exceptionally(ex -> {
+						LoggingService.logError(MODULE_NAME, String.format("Image for container \"%s\" cannot be removed", containerId),
+								new AgentSystemException(String.format("Image for container \"%s\" cannot be removed", containerId), ex));
+						return null;
+					});
 		}
+
+		return completableFuture;
 	}
 
 	/**
@@ -209,7 +245,8 @@ public class ContainerManager {
 	 *
 	 * @param task - tasks to be executed
 	 */
-	public void execute(ContainerTask task) throws Exception {
+	public CompletableFuture<Void> execute(ContainerTask task) throws Exception {
+		CompletableFuture<Void> completableFuture = CompletableFuture.completedFuture(null);
 		LoggingService.logInfo(MODULE_NAME, "Start executes assigned task");
 		docker = DockerUtil.getInstance();
 		if (task != null) {
@@ -217,20 +254,20 @@ public class ContainerManager {
 			switch (task.getAction()) {
 				case ADD:
 					if (microserviceOptional.isPresent()) {
-						addContainer(microserviceOptional.get());
+						completableFuture = addContainer(microserviceOptional.get());
 					}
 					break;
 				case UPDATE:
 					if (microserviceOptional.isPresent()) {
 						Microservice microservice = microserviceOptional.get();
-						updateContainer(microserviceOptional.get(), microservice.isRebuild() && microservice.getRegistryId() != Constants.CACHE_REGISTRY_ID);
+						completableFuture = updateContainer(microserviceOptional.get(), microservice.isRebuild() && microservice.getRegistryId() != Constants.CACHE_REGISTRY_ID);
 					}
 					break;
 				case REMOVE:
-					removeContainerByMicroserviceUuid(task.getMicroserviceUuid(), false);
+					completableFuture = removeContainerByMicroserviceUuid(task.getMicroserviceUuid(), false);
 					break;
 				case REMOVE_WITH_CLEAN_UP:
-					removeContainerByMicroserviceUuid(task.getMicroserviceUuid(), true);
+					completableFuture = removeContainerByMicroserviceUuid(task.getMicroserviceUuid(), true);
 					break;
 				case STOP:
 					stopContainerByMicroserviceUuid(task.getMicroserviceUuid());
@@ -241,6 +278,8 @@ public class ContainerManager {
 					new AgentSystemException("Container Task container be null"));
 		}
 		LoggingService.logInfo(MODULE_NAME, "Finished executes assigned task");
+
+		return completableFuture;
 	}
 
 	private void stopContainerByMicroserviceUuid(String microserviceUuid) {
