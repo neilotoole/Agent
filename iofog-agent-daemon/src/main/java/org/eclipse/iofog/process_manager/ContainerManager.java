@@ -134,7 +134,7 @@ public class ContainerManager {
 			setMicroserviceStatus(microservice.getMicroserviceUuid(), MicroserviceState.STARTING);
 
 			CompletableFuture.supplyAsync(docker.createContainer(microservice, hostName))
-				.thenAcceptAsync((containerId) -> {
+				.thenApplyAsync((containerId) -> {
 					microservice.setContainerId(containerId);
 					try {
 						microservice.setContainerIpAddress(docker.getContainerIpAddress(containerId));
@@ -142,8 +142,8 @@ public class ContainerManager {
 						throw new CompletionException(ex);
 					}
 					LoggingService.logInfo(MODULE_NAME, "container is created \"" + microservice.getImageName() + "\"");
-					CompletableFuture<Void> future = CompletableFuture.supplyAsync(startContainer(microservice));
 					microservice.setRebuild(false);
+					return CompletableFuture.supplyAsync(startContainer(microservice));
 				});
 		});
 	}

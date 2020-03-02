@@ -533,7 +533,7 @@ public class DockerUtil {
      * @param registry  - {@link Registry} where image is placed
      */
     @SuppressWarnings("resource")
-	public Supplier<Void> pullImage(String imageName, Registry registry) throws Exception {
+	public Supplier<Void> pullImage(String imageName, Registry registry) {
         return () -> {
             LoggingService.logInfo(MODULE_NAME, String.format("pull image \"%s\" ", imageName));
             String tag = null, image;
