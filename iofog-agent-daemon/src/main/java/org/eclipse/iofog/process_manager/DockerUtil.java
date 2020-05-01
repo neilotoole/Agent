@@ -35,6 +35,7 @@ import org.eclipse.iofog.utils.logging.LoggingService;
 
 import javax.json.Json;
 import javax.json.JsonObject;
+import java.io.File;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.text.DateFormat;
@@ -584,7 +585,7 @@ public class DockerUtil {
      * @param host         - host ip address
      * @return id of created {@link Container}
      */
-    public String createContainer(Microservice microservice, String host) throws NotFoundException, NotModifiedException {
+    public String createContainer(Microservice microservice, String host) throws Exception {
     	LoggingService.logInfo(MODULE_NAME ,"create container");
     	LoggingService.logInfo(MODULE_NAME ,"start create container");
     	RestartPolicy restartPolicy = RestartPolicy.onFailureRestart(10);
@@ -601,10 +602,12 @@ public class DockerUtil {
         List<Volume> volumes = new ArrayList<>();
         List<Mount> volumeMounts = new ArrayList<>();
         if (microservice.getVolumeMappings() != null && microservice.getVolumeMappings().size() != 0) {
-            microservice.getVolumeMappings().forEach(volumeMapping -> {
+            for (VolumeMapping volumeMapping: microservice.getVolumeMappings()) {
                 if (volumeMapping.getType() == VolumeMappingType.VOLUME) {
                     Volume volume = new Volume(volumeMapping.getContainerDestination());
                     volumes.add(volume);
+                } else if (!createDirectoryIfNotExists(volumeMapping.getHostDestination())) {
+                    throw new Exception(String.format("Unable to create directory %s", volumeMapping.getHostDestination()));
                 }
 
                 boolean isReadOnly;
@@ -621,7 +624,7 @@ public class DockerUtil {
                         .withTarget(volumeMapping.getContainerDestination())
                         .withReadOnly(isReadOnly);
                 volumeMounts.add(mount);
-            });
+            }
         }
         String[] hosts;
         List<String> extraHosts = microservice.getExtraHosts();
@@ -702,5 +705,10 @@ public class DockerUtil {
     public void dockerPrune() throws NotModifiedException {
         LoggingService.logInfo(MODULE_NAME , "docker image prune");
         dockerClient.pruneCmd(PruneType.IMAGES).withDangling(false).withLabelFilter("iofog-uuid").exec();
+    }
+
+    private boolean createDirectoryIfNotExists(String directoryName) {
+        File directory = new File(directoryName);
+        return directory.exists() || directory.mkdirs();
     }
 }
