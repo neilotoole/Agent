@@ -20,6 +20,7 @@ import org.powermock.api.mockito.PowerMockito;
 import org.powermock.core.classloader.annotations.PrepareForTest;
 import org.powermock.modules.junit4.PowerMockRunner;
 
+import java.util.Formatter;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 
@@ -39,6 +40,7 @@ public class LogFormatterTest {
     public void setUp() throws Exception {
         logRecord = mock(LogRecord.class);
         logFormatter = PowerMockito.spy(new LogFormatter());
+        PowerMockito.when(logRecord.getMessage()).thenReturn("log");
         PowerMockito.when(logRecord.getLevel()).thenReturn(Level.SEVERE);
     }
 
@@ -51,6 +53,6 @@ public class LogFormatterTest {
      */
     @Test
     public void testFormat() {
-        assertTrue(logFormatter.format(logRecord).contains("[SEVERE]"));
+        assertTrue(logFormatter.format(logRecord).contains("SEVERE"));
     }
 }
